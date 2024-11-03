@@ -1,0 +1,991 @@
+---
+title: "Math_6384_Project_Script_MD"
+author: "Siu_Yin_Lee"
+date: "12/7/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE, eval=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r}
+## Load library
+library(spdep)
+library(sf)
+library(smerc)
+library(tigris)
+library(RColorBrewer)
+library(leaflet)
+library(plotrix)
+library(magicfor)
+library(sp)
+
+## Change Work directory
+setwd("/Users/siuyinlee/OneDrive/School/Math 6384 Spatial Data/Project")
+
+## read shapefile for the 2015-2019 ACS data
+acs19 <- sf::st_read("./Data/american_community_survey_nbrhd_2015_2019/american_community_survey_nbrhd_2015_2019.shp")
+#data <- sf::st_read("/Users/siuyinlee/OneDrive/School/Math 6384 Spatial Data/Project/Data/american_community_survey_nbrhd_2013_2017/american_community_survey_nbrhd_2013_2017.shp")
+#data <- sf::st_read("./Data/Census_BG_Data_2020/BG_Data_2020.shp")
+
+## Plot the border of Denver to make sure the data is right
+plot(sf::st_geometry(acs19), border="grey60")
+
+## Create a Non_white column and its percentage
+NONWHITE <- acs19$TTL_POPULA - acs19$WHITE
+PCT_NONWHITE <- 100 - acs19$PCT_WHITE
+
+## Create a Other column combining ethnic groups (Native Am, Hawaiian Pacific Islander, Other Race and Multiple race)
+## they consists of small numbers of percentage
+OTHER <- acs19$NATIVE_AME + acs19$HAWAIIAN_P + acs19$OTHER_RACE + acs19$TWO_OR_MOR
+PCT_OTHER <- acs19$PCT_NATIVE + acs19$PCT_HAWAII + acs19$PCT_OTHERR + acs19$PCT_TWOORM
+
+## create a dataframe of the created columns and bind them neighborhood
+NB<- acs19$NBHD_NAME
+df_NEW <- data.frame(NB, NONWHITE, PCT_NONWHITE, OTHER, PCT_OTHER)
+
+## Merge the Non_white column
+acs19<-geo_join(acs19, df_NEW, 'NBHD_NAME', 'NB', by = NULL, how = "left")
+
+## Change column names
+colnames(acs19)[3] <- "HISPAN"
+
+## Create a list of all the ethnic groups
+ETH <- c("WHITE", "NONWHITE", "BLACK", "HISPAN", "ASIAN", "OTHER")
+
+## Extract centroids of each neighborhood
+coords <- st_coordinates(st_centroid(st_geometry(acs19)))
+
+
+## Replace two 0 values with NA
+acs19[acs19$MEDIAN_HOM == 0, ]$MEDIAN_HOM <- NA
+acs19[acs19$MED_GROSS_ == 0, ]$MED_GROSS_ <- NA
+
+##############################################
+#Exploratory plots and tables
+#############################################
+
+## Plot the map of Denver
+plot(st_geometry(acs19))
+
+
+## In order for par mfrow to work, legends need to be given up
+## Make Choropleth maps using counts
+png(file="Count_plot.png",
+    res = 300,
+    width = 5, height = 4, units = 'in',
+    pointsize = 8)
+par(mfrow = c(3, 2))
+for (i in ETH) {
+  plot(acs19[i], pal = viridisLite::cividis, key.pos = NULL, reset = FALSE)
+}
+dev.off()
+par(mfrow=c(1,1))
+
+## Get the top region counts for each race
+for (i in ETH) {
+  print(head(acs19[order(acs19[[i]], decreasing = TRUE), c("NBHD_NAME", i)], 3))
+}
+
+
+## Make Choropleth maps using percentages
+png(file="Pct_plot.png",
+    res = 300,
+    width = 5, height = 4, units = 'in',
+    pointsize = 8)
+par(mfrow = c(3, 2))
+for (i in paste0("PCT_",ETH)) {
+  plot(acs19[i], pal = viridisLite::cividis, key.pos = NULL, reset = FALSE)
+}
+dev.off()
+par(mfrow=c(1,1))
+
+## Get the top region percentages for each race
+for (i in ETH) {
+  print(head(acs19[order(acs19[[paste0("PCT_",i)]], decreasing = TRUE), c("NBHD_NAME", paste0("PCT_",i))], 3))
+}
+
+## 2019 ETHNIC group pie charts
+pie_col = brewer.pal(5, "Set2")
+
+Prop_2019 <- c(sum(acs19$WHITE), sum(acs19$HISPAN), sum(acs19$BLACK), sum(acs19$ASIAN), sum(acs19$OTHER))
+pielabel_19 <- c("WHITE", "HISPAN", "BLACK", "ASIAN", "OTHER")
+piepercent_19 <- round(100*Prop_2019/sum(Prop_2019),1)
+
+png(file="Ethnic_Grp_2019.png",
+    res = 300,
+    width = 5, height = 4, units = 'in',
+    pointsize = 8)
+pie(Prop_2019, labels = paste0(Prop_2019, "=", piepercent_19, "%"),
+    col = pie_col)
+mytitle = "Ethnic Groups in Denver"
+mysubtitle = paste0("Data: American Community Survey Nbrhd (2015-2019); Population Total: ", sum(Prop_2019))
+mtext(side=3, line=1, at=-2, adj=0, cex=1.5, mytitle)
+mtext(side=3, line=0, at=-2, adj=0, cex=0.8, mysubtitle)
+#mtext(side = 3, line = 0.25, at = 1, adj = -2, mysubtitle)
+legend("left", 
+       c("WHITE", "HISPAN", "BLACK", "ASIAN", "OTHER"), 
+       cex = 0.8, fill = pie_col)
+dev.off()
+
+
+
+##################################
+#Now let's do some testing (Local Rates)
+##################################
+
+##################################
+## 1. CEPP
+##################################
+
+##################################
+## A. CEPP - NSTAR = 0.1 of population
+##################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+nstar = floor(0.1*sum(acs19[["TTL_POPULA"]]))
+#nstar = floor(0.15*sum(acs19[["TTL_POPULA"]]))
+
+
+## Set up the CEPP parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]]
+  CEPP01 = cepp.test(coords = coords,
+                   cases = case,
+                   pop = pop,
+                   nstar = nstar,
+                   alpha = alpha)
+  
+  ## Get the 3 most-likely clusters
+  CEPP01_MLC_3 = head(summary(CEPP01),3)
+  
+  #List out the neighborhood_ID in the 5 most likely cluster
+  CEPP01_MLC_1_NB_ID = CEPP01$clusters[[1]]$locids
+  CEPP01_MLC_2_NB_ID = CEPP01$clusters[[2]]$locids
+  CEPP01_MLC_3_NB_ID = CEPP01$clusters[[3]]$locids
+
+  
+  #List out the neighborhood in the 5 most likely cluster
+  CEPP01_MLC_1_NB = acs19$NBHD_NAME[CEPP01_MLC_1_NB_ID]
+  CEPP01_MLC_2_NB = acs19$NBHD_NAME[CEPP01_MLC_2_NB_ID]
+  CEPP01_MLC_3_NB = acs19$NBHD_NAME[CEPP01_MLC_3_NB_ID]
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and nstar=", nstar)
+  cat("\nMLC_1_NB\n", CEPP01_MLC_1_NB)
+  cat("\nMLC_2_NB\n", CEPP01_MLC_2_NB)
+  cat("\nMLC_3_NB\n", CEPP01_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[CEPP01_MLC_1_NB_ID] = mycol[1]
+  #ctcol[CEPP01_MLC_2_NB_ID] = mycol[2]
+  #ctcol[CEPP01_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("CEPP01_MLC_plot_",i ,"_nstar_", nstar, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       #main = paste0("CEPP01_3 most likely clusters_",i),
+       main = paste0("CEPP01_Most likely clusters_",i),
+       sub = paste0("CEPP Method: P-value = ", round(CEPP01$clusters[[1]]$pvalue, 4), "; nstar = 10% of pop:", nstar))
+  legend("bottomright", 
+         #legend = c("1st most-likely cluster", "2nd most-likely cluster", "3rd most-likely cluster"), 
+         legend = "Most likely cluster", 
+         fill = mycol, border = "black" )
+  dev.off()
+  put(CEPP01, CEPP01_MLC_3, CEPP01_MLC_1_NB, CEPP01_MLC_2_NB, CEPP01_MLC_3_NB)
+}
+CEPP01_test_results <- magic_result()
+#CEPP015_test_results <- magic_result()
+
+
+
+
+##################################
+## B. CEPP - NSTAR = 0.15 of population
+##################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+#nstar = floor(0.1*sum(acs19[["TTL_POPULA"]]))
+nstar = floor(0.15*sum(acs19[["TTL_POPULA"]]))
+
+
+## Set up the CEPP parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]]
+  CEPP015 = cepp.test(coords = coords,
+                     cases = case,
+                     pop = pop,
+                     nstar = nstar,
+                     alpha = alpha)
+  
+  ## Get the 3 most-likely clusters
+  CEPP015_MLC_3 = head(summary(CEPP015),3)
+  
+  #List out the neighborhood_ID in the 5 most likely cluster
+  CEPP015_MLC_1_NB_ID = CEPP015$clusters[[1]]$locids
+  CEPP015_MLC_2_NB_ID = CEPP015$clusters[[2]]$locids
+  #CEPP015_MLC_3_NB_ID = CEPP015$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 5 most likely cluster
+  CEPP015_MLC_1_NB = acs19$NBHD_NAME[CEPP015_MLC_1_NB_ID]
+  CEPP015_MLC_2_NB = acs19$NBHD_NAME[CEPP015_MLC_2_NB_ID]
+  #CEPP015_MLC_3_NB = acs19$NBHD_NAME[CEPP015_MLC_3_NB_ID]
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and nstar=", nstar)
+  cat("\nMLC_1_NB\n", CEPP015_MLC_1_NB)
+  cat("\nMLC_2_NB\n", CEPP015_MLC_2_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[CEPP015_MLC_1_NB_ID] = mycol[1]
+  #ctcol[CEPP015_MLC_2_NB_ID] = mycol[2]
+  #ctcol[CEPP015_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("CEPP015_MLC_plot_",i ,"_nstar_", nstar, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("CEPP015_Most likely clusters_",i),
+       sub = paste0("CEPP Method: P-value = ", round(CEPP015$clusters[[1]]$pvalue, 4), "; nstar = 15% of pop: ", nstar))
+  legend("bottomright", 
+         legend = "Most likely cluster", 
+         fill = mycol, border = "black" )
+  dev.off()
+  put(CEPP015, CEPP015_MLC_3, CEPP015_MLC_1_NB ,CEPP015_MLC_2_NB
+      #, CEPP015_MLC_3_NB
+      )
+}
+#CEPP01_test_results <- magic_result()
+CEPP015_test_results <- magic_result()
+
+
+
+##################################
+## 2. BN
+##################################
+
+##################################
+## A. BN - CSTAR - 10% of CASES
+##################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+cstar_prop = 0.1
+#cstar_prop = 0.2
+
+
+## Set up the BN parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  cstar = floor(cstar_prop*sum(acs19[[i]]))
+  case = acs19[[i]]
+  BN01 = bn.test(coords = coords,
+                     cases = case,
+                     pop = pop,
+                     cstar = cstar,
+                     alpha = alpha)
+  
+  ## Get the 3 most-likely clusters
+  BN01_MLC_3 = head(summary(BN01),3)
+  
+  #List out the neighborhood_ID in the 3 most likely cluster
+  BN01_MLC_1_NB_ID = BN01$clusters[[1]]$locids
+  BN01_MLC_2_NB_ID = BN01$clusters[[2]]$locids
+  BN01_MLC_3_NB_ID = BN01$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 3 most likely cluster
+  BN01_MLC_1_NB = acs19$NBHD_NAME[BN01_MLC_1_NB_ID]
+  BN01_MLC_2_NB = acs19$NBHD_NAME[BN01_MLC_2_NB_ID]
+  BN01_MLC_3_NB = acs19$NBHD_NAME[BN01_MLC_3_NB_ID]
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and cstar=", cstar)
+  cat("\nMLC_1_NB\n", BN01_MLC_1_NB)
+  cat("\nMLC_2_NB\n", BN01_MLC_2_NB)
+  cat("\nMLC_3_NB\n", BN01_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[BN01_MLC_1_NB_ID] = mycol[1]
+  #ctcol[BN01_MLC_2_NB_ID] = mycol[2]
+  #ctcol[BN01_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("BN01_MLC_plot_",i ,"_cstar_", cstar, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("BN01_Most likely clusters_",i),
+       sub = paste0("BN Method: P-value = ", round(BN01$clusters[[1]]$pvalue, 4), "; cstar = 10% of cases: ", cstar))
+  legend("bottomright", 
+         #legend = c("1st most-likely cluster", "2nd most-likely cluster", "3rd most-likely cluster"), 
+         legend = "Most likely cluster",
+         fill = mycol, border = "black" )
+  dev.off()
+  put(BN01, BN01_MLC_3, BN01_MLC_1_NB, BN01_MLC_2_NB, BN01_MLC_3_NB)
+}
+BN01_test_results <- magic_result()
+
+
+
+
+
+##################################
+## B. BN - CSTAR - 20% of CASES
+##################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+#cstar_prop = 0.1
+cstar_prop = 0.2
+
+
+## Set up the BN parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  cstar = floor(cstar_prop*sum(acs19[[i]]))
+  case = acs19[[i]]
+  BN02 = bn.test(coords = coords,
+                 cases = case,
+                 pop = pop,
+                 cstar = cstar,
+                 alpha = alpha)
+  
+  ## Get the 3 most-likely clusters
+  BN02_MLC_3 = head(summary(BN02),3)
+  
+  #List out the neighborhood_ID in the 3 most likely cluster
+  BN02_MLC_1_NB_ID = BN02$clusters[[1]]$locids
+  BN02_MLC_2_NB_ID = BN02$clusters[[2]]$locids
+  #BN02_MLC_3_NB_ID = BN02$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 3 most likely cluster
+  BN02_MLC_1_NB = acs19$NBHD_NAME[BN02_MLC_1_NB_ID]
+  BN02_MLC_2_NB = acs19$NBHD_NAME[BN02_MLC_2_NB_ID]
+  #BN02_MLC_3_NB = acs19$NBHD_NAME[BN02_MLC_3_NB_ID]
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and cstar=", cstar)
+  cat("\nMLC_1_NB\n", BN02_MLC_1_NB)
+  cat("\nMLC_2_NB\n", BN02_MLC_2_NB)
+  #cat("\nMLC_3_NB\n", BN02_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[BN02_MLC_1_NB_ID] = mycol[1]
+  #ctcol[BN02_MLC_2_NB_ID] = mycol[2]
+  #ctcol[BN02_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("BN02_MLC_plot_",i ,"_cstar_", cstar, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("BN02_Most likely clusters_",i),
+       sub = paste0("BN Method: P-value = ", round(BN02$clusters[[1]]$pvalue, 4), "; cstar = 20% of cases: ", cstar))
+  legend("bottomright", 
+         #legend = c("1st most-likely cluster", "2nd most-likely cluster", "3rd most-likely cluster"), 
+         legend = "Most likely cluster",
+         fill = mycol, border = "black" )
+  dev.off()
+  put(BN02, BN02_MLC_3, BN02_MLC_1_NB, BN02_MLC_2_NB
+      #, BN02_MLC_3_NB
+      )
+}
+BN02_test_results <- magic_result()
+
+
+
+
+##################################
+## C. BN - CSTAR - 15% of CASES
+##################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+#cstar_prop = 0.1
+#cstar_prop = 0.2
+cstar_prop = 0.15
+
+## Set up the BN parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  cstar = floor(cstar_prop*sum(acs19[[i]]))
+  case = acs19[[i]]
+  BN015 = bn.test(coords = coords,
+                 cases = case,
+                 pop = pop,
+                 cstar = cstar,
+                 alpha = alpha)
+  
+  ## Get the 3 most-likely clusters
+  BN015_MLC_3 = head(summary(BN015),3)
+  
+  #List out the neighborhood_ID in the 3 most likely cluster
+  BN015_MLC_1_NB_ID = BN015$clusters[[1]]$locids
+  BN015_MLC_2_NB_ID = BN015$clusters[[2]]$locids
+  #BN015_MLC_3_NB_ID = BN015$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 3 most likely cluster
+  BN015_MLC_1_NB = acs19$NBHD_NAME[BN015_MLC_1_NB_ID]
+  BN015_MLC_2_NB = acs19$NBHD_NAME[BN015_MLC_2_NB_ID]
+  #BN015_MLC_3_NB = acs19$NBHD_NAME[BN015_MLC_3_NB_ID]
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and cstar=", cstar)
+  cat("\nMLC_1_NB\n", BN015_MLC_1_NB)
+  cat("\nMLC_2_NB\n", BN015_MLC_2_NB)
+  #cat("\nMLC_3_NB\n", BN015_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[BN015_MLC_1_NB_ID] = mycol[1]
+  #ctcol[BN015_MLC_2_NB_ID] = mycol[2]
+  #ctcol[BN015_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("BN015_MLC_plot_",i ,"_cstar_", cstar, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("BN015_Most likely clusters_",i),
+       sub = paste0("BN Method: P-value = ", round(BN015$clusters[[1]]$pvalue, 4), "; cstar = 20% of cases: ", cstar))
+  legend("bottomright", 
+         #legend = c("1st most-likely cluster", "2nd most-likely cluster", "3rd most-likely cluster"), 
+         legend = "Most likely cluster",
+         fill = mycol, border = "black" )
+  dev.off()
+  put(BN015, BN015_MLC_3, BN015_MLC_1_NB, BN015_MLC_2_NB
+      #, BN015_MLC_3_NB
+  )
+}
+BN015_test_results <- magic_result()
+
+
+
+
+
+
+
+################################################
+## 3. Spatial Scan method using CRH for each race
+################################################
+
+################################################
+## A. Spatial Scan ubpop = 0.1
+################################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+ubpop = 0.1
+#ubpop = 0.15
+
+#Change plot margin
+par(mar=c(1,1,1,1))
+
+## Set up the scan parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]]
+  scan01 = scan.test(coords = coords,
+                   cases = case,
+                   pop = pop,
+                   ex = sum(case)/sum(pop)*pop,
+                   alpha = alpha,
+                   ubpop = ubpop)
+  
+  ## Get the 3 most-likely clusters
+  scan01_MLC_3 = head(summary(scan01),3)
+  
+  #List out the neighborhood_ID in the 3 most likely cluster
+  scan01_MLC_1_NB_ID = scan01$clusters[[1]]$locids
+  scan01_MLC_2_NB_ID = scan01$clusters[[2]]$locids
+  scan01_MLC_3_NB_ID = scan01$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 3 most likely cluster
+  scan01_MLC_1_NB = acs19$NBHD_NAME[scan01_MLC_1_NB_ID]
+  scan01_MLC_2_NB = acs19$NBHD_NAME[scan01_MLC_2_NB_ID]
+  scan01_MLC_3_NB = acs19$NBHD_NAME[scan01_MLC_3_NB_ID]
+
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and ubpop=", ubpop)
+  cat("\nMLC_1_NB\n", scan01_MLC_1_NB)
+  cat("\nMLC_2_NB\n", scan01_MLC_2_NB)
+  cat("\nMLC_3_NB\n", scan01_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[scan01_MLC_1_NB_ID] = mycol[1]
+  #ctcol[scan01_MLC_2_NB_ID] = mycol[2]
+  #ctcol[scan01_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("Scan01_MLC_plot_",i ,"_up_", ubpop, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("Scan01_Most likely clusters_",i),
+       sub = paste0("Spatial Scan Method: P-value = ", round(scan01$clusters[[1]]$pvalue, 4), "; ubpop = ", ubpop))
+  legend("bottomright", 
+         legend = "Most likely cluster", 
+         fill = mycol, border = "black" )
+  dev.off()
+  put(scan01, scan01_MLC_3, scan01_MLC_1_NB, scan01_MLC_2_NB, scan01_MLC_3_NB)
+}
+scan01_test_results <- magic_result()
+
+
+
+################################################
+## B. Spatial Scan ubpop = 0.15
+################################################
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+alpha = 0.05
+#ubpop = 0.1
+ubpop = 0.15
+
+#Change plot margin
+par(mar=c(1,1,1,1))
+
+## Set up the scan parameters using alpha = 0.05
+## Using magicfor to store scan result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]]
+  scan015 = scan.test(coords = coords,
+                     cases = case,
+                     pop = pop,
+                     ex = sum(case)/sum(pop)*pop,
+                     alpha = alpha,
+                     ubpop = ubpop)
+  
+  ## Get the 3 most-likely clusters
+  scan015_MLC_3 = head(summary(scan015),3)
+  
+  #List out the neighborhood_ID in the 3 most likely cluster
+  scan015_MLC_1_NB_ID = scan015$clusters[[1]]$locids
+  scan015_MLC_2_NB_ID = scan015$clusters[[2]]$locids
+  scan015_MLC_3_NB_ID = scan015$clusters[[3]]$locids
+  
+  
+  #List out the neighborhood in the 3 most likely cluster
+  scan015_MLC_1_NB = acs19$NBHD_NAME[scan015_MLC_1_NB_ID]
+  scan015_MLC_2_NB = acs19$NBHD_NAME[scan015_MLC_2_NB_ID]
+  scan015_MLC_3_NB = acs19$NBHD_NAME[scan015_MLC_3_NB_ID]
+  
+  
+  cat("\n===============================================")
+  cat("\nThe following are MLC NB for ", i, "\n, using alpha= ", alpha, "\n and ubpop=", ubpop)
+  cat("\nMLC_1_NB\n", scan015_MLC_1_NB)
+  cat("\nMLC_2_NB\n", scan015_MLC_2_NB)
+  cat("\nMLC_3_NB\n", scan015_MLC_3_NB)
+  cat("\n===============================================")
+  
+  # create vector of colors to show results
+  mycol = brewer.pal(3, "Dark2")
+  
+  # default is white (no clustering)
+  ctcol = rep("white", nrow(acs19))
+  
+  # Color the 3 most likely clusters
+  ctcol[scan015_MLC_1_NB_ID] = mycol[1]
+  #ctcol[scan01_MLC_2_NB_ID] = mycol[2]
+  #ctcol[scan01_MLC_3_NB_ID] = mycol[3]
+  
+  #Make the plot
+  png(file= paste0("Scan015_MLC_plot_",i ,"_up_", ubpop, ".png"), 
+      res = 300, 
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(sf::st_geometry(acs19), border="grey60",
+       col = ctcol, 
+       main = paste0("Scan015_Most likely clusters_",i),
+       sub = paste0("Spatial Scan Method: P-value = ", round(scan015$clusters[[1]]$pvalue, 4), "; ubpop = ", ubpop))
+  legend("bottomright", 
+         legend = "Most likely cluster", 
+         fill = mycol, border = "black" )
+  dev.off()
+  put(scan015, scan015_MLC_3, scan015_MLC_1_NB, scan015_MLC_2_NB, scan015_MLC_3_NB)
+}
+scan015_test_results <- magic_result()
+
+
+
+
+#####################################################
+# Now let's do some Spatial Autocorrelation testing
+#####################################################
+
+##################################################################
+# Need to determine neighbors relationship for Moran's I and Gerry C
+##################################################################
+
+## Extract centroids of each neighborhood
+nb_centroids <- st_centroid(st_geometry(acs19))
+
+#Border-based nb
+(nb_acs19 <-spdep::poly2nb(acs19))
+plot(st_geometry(acs19))
+plot(nb_acs19, st_centroid(st_geometry(acs19)), add = TRUE)
+title("Border-Based Neighbor Relationships of Denver NBHD")
+
+#Distance-based nb using 10 km as upper dist threshold
+(nb_acs19_dnn <-spdep::dnearneigh(nb_centroids, d1 = 0, d2 = 10))
+plot(st_geometry(acs19))
+plot(nb_acs19_dnn, st_centroid(st_geometry(acs19)), add = TRUE)
+title("Neighbor (within 10 km) relationships of Denver")
+
+# KNN nb using K=5
+nb_acs19_knn <- spdep::knn2nb(spdep::knearneigh(nb_centroids, k=5))
+plot(st_geometry(acs19))
+plot(nb_acs19_knn, st_centroid(st_geometry(acs19)), add = TRUE)
+title("Neighbor (5 nearest) relationships of Denver")
+
+
+##################################################################
+# Decide which neighbor relationship to use (border, dnn or knn)
+##################################################################
+
+Neigh_RS = nb_acs19 #border
+#Neigh_RS = nb_acs19_dnn #distance-based
+#Neigh_RS = nb_acs19_knn #5 nearest neighbor
+
+#Set proximity matrix
+
+# assume adjacency weights (w_ij = 1 if regions i and j share a boundary)
+# proximity matrix, binary style.  W is row standardized.
+w = nb2mat(Neigh_RS , style = "B")
+# see ?nb2listw for more options
+# proximaty matrix in list format
+lw = nb2listw(Neigh_RS , style = "B")
+
+
+#######################################
+## 4. Moran's Icr Monte Carlos under CRH
+#######################################
+set.seed(108)
+# some preliminaries
+N = length(acs19$NBHD_NAME) # number of regions
+pop = acs19[["TTL_POPULA"]] #population sizes
+nsim = 9999
+
+### Use CR Moran's I for inference
+# make a function out of this process
+i_cr = function(y, rni, w) {
+  y_std = matrix((y - rni)/sqrt(rni))
+  return(sum(w * y_std %*% t(y_std))/sum(w))
+}
+
+## Set up the Moran's Icr parameters
+## Using magicfor to store test result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]] # number of cases
+  r = sum(case)/sum(pop) # estimated risk (global)
+  e = r * pop # expected per region
+  print(paste0("For ", i))
+  print(paste0("Obs count: ", case, ". Exp count: ", ceiling(e)))
+
+  tsimc = numeric(nsim)
+  print(paste0("Observed Moran's Icr statistic for ", i))
+  t0c = i_cr(case, e, w) # observed statistic
+  print(t0c)
+  
+  # statistics for data simualted under CRH
+  for (j in 1:nsim) tsimc[j] = i_cr(rpois(N, e), rni = e, w = w)
+  
+  # p-value
+  print(paste0("P-value for Moran's Icr statistic for ", i))
+  p_value = (sum(tsimc >= t0c) + 1)/(nsim + 1)
+  print(p_value)
+  
+  put(r, e, t0c, p_value)
+
+}
+
+Moran_Icr_results <- magic_result()
+
+
+##################################
+## 5. Tango
+##################################
+
+coords <- st_coordinates(st_centroid(st_geometry(acs19)))
+d <- as.matrix(dist(coords))
+max(d)
+mean(d)
+
+# # Code to plot weights and "effective range"
+plotdist <- seq(0, max(d), 0.01)
+kappa <- 0.005
+plot(plotdist,
+     exp(-plotdist/kappa),type="l",xlab="Distance",ylab="exp(-distance/kappa)",
+     cex.lab=1.5,cex.axis=1.25,ylim=c(0,0.1))
+#rug(dist)
+title(paste("kappa = ",kappa),cex.main=2.0)
+effrange <- -kappa*log(0.005)
+segments(0,0.005,effrange,0.005)
+segments(effrange,0,effrange,0.005)
+
+
+
+## Assign population
+pop <-acs19[["TTL_POPULA"]]
+# Set different weights using different kappa
+# May need to double check the intercentroid distances' range
+#k_value = 0.005
+#k_value = 0.01
+k_value = 0.05
+#k_value = 0.1
+#k_value = 0.2
+#k_value = 0.4
+#k_value = 1
+#k_value = 10
+#k_value = 20
+#k_value = 50
+wstar <- dweights(coords, pop = pop, kappa = k_value, type = "rogerson")
+#wstar <- dweights(coords, kappa = k_value)
+
+set.seed(108)
+## Set up the Tango.test parameters
+## Using magicfor to store test result
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  case = acs19[[i]]
+  print(paste0("Tango Test Result for ", i))
+  tango = tango.test(cases = case,
+                         pop = pop,
+                         w = wstar,
+                         nsim = 9999)
+  print(tango)
+  
+  #Make the plot of simulated result to check Goodness-of-fit and Spatial Association
+  png(file= paste0("Tango_plot_",i ,"_kappa_", k_value, ".png"),
+      res = 300,
+      width = 5, height = 4, units = 'in',
+      pointsize = 8)
+  plot(tango,
+       main = paste0("Tango_Plot_",i),
+       #sub = paste0("Tango's Index - using kappa = ", test))
+       sub = paste0("Tango's Index - using kappa = ", k_value))
+  legend("bottomright",
+         legend = c("Observed Data", "Simulations"),
+         pch = c(20, 2),
+         inset=c(0,1), xpd=TRUE, horiz=TRUE, bty="n")
+  dev.off()
+  put(tango)
+}
+
+tango_test_results <- magic_result()
+
+
+
+##################################################################
+# Summarize Ethnic Cluster NBHD Characteristics 
+##################################################################
+magic_free()
+## Nested loop make tables
+table_name <- c("CEPP01","CEPP015","BN01","BN02","scan01","scan015")
+outside_list<- list()
+for (t in table_name) {
+  temp_list<- list()
+  for (i in 1:length(ETH)) {
+    
+    ## Get the MLC regions ID for each ethnic group
+    temp_name<- paste0(t,"_test_results")
+    MLC_ID<-eval(parse(text=temp_name))[[t]][[i]][["clusters"]][[1]][["locids"]]
+    print(MLC_ID)
+    
+    ## Subset acs dataframe using regions ID
+    subset_df <- acs19[MLC_ID, ]
+    
+    ## Create a vector of interested variables
+    cal_var <- c("TTL_POPULA", 
+                 ETH[i], 
+                 paste0("PCT_",ETH[i]),
+                 "FOREIGN_BO",
+                 "MEDIAN_AGE", 
+                 "AGELESS18",
+                 "AGE65PLUS",
+                 "TOTAL_COMM",
+                 "COMMUTE_30",
+                 "COMMUTE_45",
+                 "COMMUTE_60",
+                 "MED_HH_INC",
+                 "MED_GROSS_",
+                 "MEDIAN_HOM",
+                 "PCT_FAM_PO",
+                 "BACHELORS_",
+                 "TTLPOP_5PL",
+                 "ONLY_ENGLI",
+                 "TTL_HOUSIN",
+                 "BUILT_2014",
+                 "BUILT_2010",
+                 "BUILT_2000",
+                 "RENTER_OCC",
+                 "OWNER_OCCU",
+                 "TTL_HOUSEH",
+                 "FAMILY_HOU",
+                 "MALE_HHLDR",
+                 "FEMALE_HHL"
+    )
+    subset_df<-subset_df[ ,cal_var, drop=TRUE]
+    
+    ## Calculate cluster average for desired variables
+    Avg_df<- data.frame(t(sapply(subset_df, mean)))
+    Avg_df["Regions_Count"] <- length(MLC_ID)
+    
+    ## Calculate cluster sum for desired variables
+    Sum_df<- data.frame(t(sapply(subset_df, sum)))
+    Sum_df["Regions_Count"] <- length(MLC_ID)
+    
+    temp_list[[i]] <- list(subset_df = subset_df, Avg_df = Avg_df, Sum_df = Sum_df) 
+  }
+  names(temp_list) <- ETH
+  outside_list[[which(table_name == t)]] <- temp_list
+}
+
+names(outside_list) <- paste0(table_name, "_NB_summary")
+
+## Shoot the NB_summary_list to the global environment
+list2env(outside_list, envir = .GlobalEnv)
+
+
+#################################
+## Make final summary ethnic df
+################################
+
+magic_for(silent = TRUE, progress = TRUE)
+for (i in ETH) {
+  CEPP01<-CEPP01_NB_summary[[i]][["Sum_df"]]
+  CEPP015<-CEPP015_NB_summary[[i]][["Sum_df"]]
+  BN01<-BN01_NB_summary[[i]][["Sum_df"]]
+  BN02<-BN02_NB_summary[[i]][["Sum_df"]]
+  scan01<-scan01_NB_summary[[i]][["Sum_df"]]
+  scan015<-scan015_NB_summary[[i]][["Sum_df"]]
+  
+  temp_df<-rbind(CEPP01, CEPP015, BN01, BN02, scan01, scan015)
+  put(temp_df)
+}
+
+final_df_all <- magic_result()
+
+White_df<- final_df_all[["temp_df"]][[1]]
+Nonwhite_df<- final_df_all[["temp_df"]][[2]]
+Black_df<- final_df_all[["temp_df"]][[3]]
+Hisp_df<- final_df_all[["temp_df"]][[4]]
+Asian_df<- final_df_all[["temp_df"]][[5]]
+Other_df<- final_df_all[["temp_df"]][[6]]
+
+avg_white<- round(colMeans(White_df[, -c(2:3)], na.rm = TRUE))
+avg_nonwhite<- round(colMeans(Nonwhite_df[, -c(2:3)], na.rm = TRUE))
+avg_black <- round(colMeans(Black_df[, -c(2:3)], na.rm = TRUE))
+avg_hisp<- round(colMeans(Hisp_df[, -c(2:3)], na.rm = TRUE))
+avg_asian<- round(colMeans(Asian_df[, -c(2:3)], na.rm = TRUE))
+avg_other<- round(colMeans(Other_df[, -c(2:3)], na.rm = TRUE))
+
+End_Result <- rbind(avg_white, avg_hisp, avg_black, avg_asian, avg_other)
+End_Result <- as.data.frame(End_Result)
+
+End_Result[["C_PCT_FB"]] <- round(End_Result$FOREIGN_BO/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_AGEL18"]] <- round(End_Result$AGELESS18/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_AGE65P"]] <- round(End_Result$AGE65PLUS/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_COMM"]] <- round(End_Result$TOTAL_COMM/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_COMM_L"]] <- round((End_Result$COMMUTE_30+End_Result$COMMUTE_45+End_Result$COMMUTE_60)/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_BACH"]] <- round(End_Result$BACHELORS_/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_FL"]] <- round(End_Result$TTLPOP_5PL/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_ENG_ONLY"]] <- round(End_Result$ONLY_ENGLI/End_Result$TTL_POPULA, 2)
+End_Result[["C_PCT_NEWH"]] <- round((End_Result$BUILT_2000+End_Result$BUILT_2010+End_Result$BUILT_2014)/End_Result$TTL_HOUSIN, 2)
+End_Result[["C_PCT_MHH"]] <- round(End_Result$MALE_HHLDR/End_Result$TTL_HOUSEH, 2)
+End_Result[["C_PCT_FHH"]] <- round(End_Result$FEMALE_HHL/End_Result$TTL_HOUSEH, 2)
+End_Result[["C_PCT_RenterOcc"]] <- round(End_Result$RENTER_OCC/End_Result$TTL_HOUSEH, 2)
+End_Result[["C_PCT_FamHH"]] <- round(End_Result$FAMILY_HOU/End_Result$TTL_HOUSEH, 2)
+End_Result[["C_PCT_FamPov"]] <- round(End_Result$PCT_FAM_PO/End_Result$Regions_Count, 2)
+End_Result[["C_Med_HH_INC"]] <- round(End_Result$MED_HH_INC/End_Result$Regions_Count, 2)
+End_Result[["C_Med_Home_Val"]] <- round(End_Result$MEDIAN_HOM/End_Result$Regions_Count, 2)
+End_Result[["C_Med_Rent"]] <- round(End_Result$MED_GROSS_/End_Result$Regions_Count, 2)
+
+```
+
+# Appendix: All code for this report
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
